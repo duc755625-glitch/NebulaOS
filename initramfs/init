@@ -1,0 +1,80 @@
+#!/bin/sh
+set -eu
+
+echo "NebulaOS initramfs: start" >/dev/console 2>/dev/null || true
+
+mount -t proc proc /proc 2>/dev/null || true
+mount -t sysfs sys /sys 2>/dev/null || true
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+
+wait_for_dev() {
+  i=0
+  while [ $i -lt 80 ]; do
+    if [ -e "$1" ]; then
+      return 0
+    fi
+    i=$((i + 1))
+    sleep 0.1
+  done
+  return 1
+}
+
+ISO_DEV=""
+if wait_for_dev /dev/sr0; then
+  ISO_DEV="/dev/sr0"
+elif [ -e /dev/cdrom ]; then
+  ISO_DEV="/dev/cdrom"
+fi
+
+mkdir -p /mnt/nebula_iso
+if [ -n "$ISO_DEV" ]; then
+  mount -t iso9660 -o ro "$ISO_DEV" /mnt/nebula_iso 2>/dev/null || \
+  mount -t udf -o ro "$ISO_DEV" /mnt/nebula_iso 2>/dev/null || true
+fi
+
+ROOTFS_SQ="/mnt/nebula_iso/rootfs/rootfs.squashfs"
+ROOTFS_EXT="/mnt/nebula_iso/rootfs/rootfs.ext4"
+ROOTMOUNT="/newroot"
+
+mkdir -p "$ROOTMOUNT"
+
+if [ -f "$ROOTFS_SQ" ]; then
+  echo "NebulaOS initramfs: mounting squashfs root" >/dev/console 2>/dev/null || true
+  mount -t squashfs -o ro "$ROOTFS_SQ" "$ROOTMOUNT"
+elif [ -f "$ROOTFS_EXT" ]; then
+  echo "NebulaOS initramfs: mounting ext4 root (loop)" >/dev/console 2>/dev/null || true
+  modprobe loop 2>/dev/null || true
+
+  # Attach loop device for the ext4 image
+  LOOPDEV="$(losetup -f --show -o 0 "$ROOTFS_EXT" 2>/dev/null || true)"
+  if [ -z "$LOOPDEV" ]; then
+    echo "NebulaOS initramfs: ERROR: could not setup loop device" >/dev/console 2>/dev/null || true
+    exit 1
+  fi
+
+  mount -t ext4 -o ro "$LOOPDEV" "$ROOTMOUNT"
+else
+  echo "NebulaOS initramfs: ERROR: no bundled rootfs image found on ISO" >/dev/console 2>/dev/null || true
+  echo "Searched: $ROOTFS_SQ and $ROOTFS_EXT" >/dev/console 2>/dev/null || true
+  exit 1
+fi
+
+# Prepare pseudo fs for the real init
+mkdir -p "$ROOTMOUNT"/proc "$ROOTMOUNT"/sys "$ROOTMOUNT"/dev
+mount -t proc proc "$ROOTMOUNT"/proc 2>/dev/null || true
+mount -t sysfs sys "$ROOTMOUNT"/sys 2>/dev/null || true
+mount -t devtmpfs devtmpfs "$ROOTMOUNT"/dev 2>/dev/null || true
+
+# Exec into the real init. systemd-based rootfs is expected.
+if [ -x "$ROOTMOUNT/sbin/init" ]; then
+  REAL_INIT="/sbin/init"
+elif [ -x "$ROOTMOUNT/bin/systemd" ]; then
+  REAL_INIT="/bin/systemd"
+else
+  REAL_INIT="/sbin/init"
+fi
+
+echo "NebulaOS initramfs: starting real init: $REAL_INIT" >/dev/console 2>/dev/null || true
+
+# switch_root is provided by BusyBox.
+exec switch_root "$ROOTMOUNT" "$REAL_INIT"
